@@ -1,0 +1,109 @@
+name: CI
+
+# Verificación en contenedores: construye los mismos targets de los
+# Containerfile que usa `./dev.sh release`, sin instalar Python ni Node en el
+# runner. Docker produce las mismas imágenes OCI que Podman en local.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend · pruebas
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Construir la imagen de pruebas
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          file: ./backend/Containerfile
+          target: test
+          tags: sistema-contable-backend:test
+          load: true
+          cache-from: type=gha,scope=backend-test
+          cache-to: type=gha,mode=max,scope=backend-test
+
+      - name: Ejecutar pytest
+        run: docker run --rm sistema-contable-backend:test
+
+  frontend:
+    name: Frontend · producción
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      # El stage `build` ejecuta `pnpm build`, que corre vue-tsc y vite build:
+      # un solo paso valida tipos, compila y empaqueta dentro de la imagen de
+      # nginx.
+      - name: Construir la imagen de producción del frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./frontend/Containerfile
+          target: prod
+          tags: sistema-contable-frontend:ci
+          load: true
+          cache-from: type=gha,scope=frontend-prod
+          cache-to: type=gha,mode=max,scope=frontend-prod
+
+      - name: Construir la imagen de producción del backend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          file: ./backend/Containerfile
+          target: prod
+          tags: sistema-contable-backend:ci
+          load: true
+          cache-from: type=gha,scope=backend-prod
+          cache-to: type=gha,mode=max,scope=backend-prod
+
+      # Smoke test del stack real. nginx resuelve `backend` al arrancar, así que
+      # comparten una red propia y el backend se inicia primero.
+      - name: Levantar el stack de producción
+        run: |
+          docker network create ci
+          docker run -d --name backend --network ci \
+            -e DATABASE_URL=sqlite:////tmp/ci.db \
+            -e REDIS_URL=memory:// \
+            -e JWT_SECRET_KEY=ci-clave-de-al-menos-32-bytes-para-smoke \
+            sistema-contable-backend:ci
+          docker run -d --name web --network ci -p 8080:80 sistema-contable-frontend:ci
+
+      - name: Verificar /api/health y la SPA
+        run: |
+          for intento in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/api/health; then
+              echo
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/api/health \
+            | grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"'
+          curl -fsS http://localhost:8080/ | grep -q '<div id="app">'
+
+      - name: Logs de los contenedores
+        if: failure()
+        run: |
+          docker logs backend || true
+          docker logs web || true
