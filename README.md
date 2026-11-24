@@ -10,6 +10,7 @@ Aplicación web para administrar la contabilidad de pymes, comercios y profesion
 ![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)
 ![OpenAPI 3](https://img.shields.io/badge/OpenAPI-3.0.3-6BA539?logo=openapiinitiative&logoColor=white)
 ![Podman](https://img.shields.io/badge/Podman-compose-892CA0?logo=podman&logoColor=white)
+![CI](https://github.com/RodrigoGajardo22/Sistema_Contable/actions/workflows/ci.yml/badge.svg?branch=master)
 
 <p align="center">
   <img src="docs/capturas/panel.png" alt="Panel principal del sistema contable" width="880">
@@ -309,6 +310,7 @@ El script verifica Podman, prepara los `.env` faltantes, construye las imágenes
 - En tests se baja el costo de Argon2 para que la suite sea rápida; en desarrollo y producción valen los defaults de OWASP.
 - Migraciones Alembic versionadas y aplicadas en cada arranque de desarrollo.
 - El `release` valida que la imagen de producción arranque con gunicorn y responda `/api/health`.
+- **CI en GitHub Actions** (`.github/workflows/ci.yml`): en cada push a `master` y en cada pull request construye los mismos `Containerfile` que `./dev.sh release`, corre la suite en un contenedor descartable y levanta el stack de producción (nginx + gunicorn) para verificar que la SPA se sirva y que `/api/health` responda.
 
 ## Desarrollo
 
@@ -398,7 +400,6 @@ sistema_contable/
 - **Un estudio por despliegue:** los clientes están aislados entre sí, pero no hay separación multi-estudio.
 - **Tokens en `localStorage`:** es un trade-off de simplicidad. Para un entorno de alto riesgo conviene evaluar cookies `httpOnly` + CSRF.
 - **Demo local:** las credenciales son públicas y los datos son de ejemplo.
-- **CI:** la verificación es local (`./dev.sh test/check/release`); todavía no hay pipeline automatizado.
 
 ## Roadmap
 
@@ -407,7 +408,7 @@ sistema_contable/
 - Exportación de reportes a PDF y Excel.
 - Rotación de refresh tokens y migración a cookies `httpOnly`.
 - Soporte multi-estudio.
-- CI/CD con despliegue automatizado.
+- Despliegue automatizado (CD) del stack de producción.
 
 ## Documentación
 
