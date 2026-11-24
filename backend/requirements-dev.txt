@@ -1,0 +1,6 @@
+# Dependencias solo para desarrollo y pruebas (no entran a la imagen de producción)
+-r requirements.txt
+
+pytest==8.4.2
+pytest-cov==7.0.0
+openapi-spec-validator==0.7.2

@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# Overlay de PRODUCCIÓN.
+#
+#   podman compose -f infra/compose.yaml -f infra/compose.prod.yaml \
+#     --env-file infra/.env.prod up -d --build
+#
+# La imagen del frontend es nginx + build estático + proxy a /api,
+# así que ella misma es el gateway en :8080.
+# ---------------------------------------------------------------------------
+services:
+  backend:
+    env_file:
+      - ../backend/.env.prod
+    environment:
+      APP_ENV: production
+
+  frontend:
+    ports:
+      - '8080:80'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1/']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

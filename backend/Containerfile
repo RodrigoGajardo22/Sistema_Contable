@@ -1,0 +1,62 @@
+# Dependencias de ejecución (las que necesita la imagen de producción)
+FROM python:3.12-slim AS base
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+COPY requirements.txt ./
+RUN pip install -r requirements.txt
+
+# Sólo el código de la aplicación: tests y dependencias de desarrollo quedan
+# fuera de la imagen de producción.
+COPY app ./app
+COPY migrations ./migrations
+COPY run.py ./
+
+# ---------------------------------------------------------------------------
+# Desarrollo: servidor de Flask con recarga automática.
+# El código se monta como bind mount desde el host.
+# ---------------------------------------------------------------------------
+FROM base AS dev
+
+EXPOSE 5000
+
+CMD ["flask", "--app", "run.py", "run", "--debug", "--host=0.0.0.0", "--port=5000"]
+
+# ---------------------------------------------------------------------------
+# Pruebas: imagen descartable con pytest (no se publica).
+#   podman build --target test -t sistema-contable-backend:test -f backend/Containerfile backend
+#   podman run --rm sistema-contable-backend:test
+# ---------------------------------------------------------------------------
+FROM base AS test
+
+COPY requirements-dev.txt ./
+COPY pytest.ini ./
+RUN pip install -r requirements-dev.txt
+
+COPY tests ./tests
+
+CMD ["pytest", "-q"]
+
+# ---------------------------------------------------------------------------
+# Producción: gunicorn con usuario sin privilegios.
+# ---------------------------------------------------------------------------
+FROM base AS prod
+
+RUN groupadd --system app \
+    && useradd --system --gid app --create-home app
+
+USER app
+
+EXPOSE 5000
+
+CMD ["gunicorn", \
+     "--bind", "0.0.0.0:5000", \
+     "--workers", "2", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "run:app"]

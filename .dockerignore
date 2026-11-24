@@ -1,0 +1,37 @@
+# Contexto de build del frontend (raíz del repositorio).
+# Podman/buildah y el provider de `podman compose` leen este archivo.
+# (No se usa .containerignore porque docker-compose no lo interpreta.)
+
+.git
+.gitignore
+.gitattributes
+
+# Dependencias y artefactos generados en el host
+node_modules
+**/node_modules
+dist
+**/dist
+**/*.tsbuildinfo
+
+# Python (no forma parte de la imagen del frontend)
+backend
+**/__pycache__
+**/*.py[cod]
+
+# Variables de entorno: nunca entran a una imagen
+**/.env
+**/.env.*
+!**/.env.example
+
+# Tests y herramientas
+frontend/e2e
+test-results
+playwright-report
+blob-report
+
+# Documentación y editores
+*.md
+dev.sh
+.vscode
+.idea
+.DS_Store

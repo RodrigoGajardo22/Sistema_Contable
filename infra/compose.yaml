@@ -1,0 +1,123 @@
+# ---------------------------------------------------------------------------
+# Configuración común a todos los entornos.
+#
+#   Desarrollo : compose.yaml + compose.dev.yaml  (--env-file infra/.env.dev)
+#   Producción : compose.yaml + compose.prod.yaml (--env-file infra/.env.prod)
+#
+# Los puertos publicados viven en los overlays: acá nada se expone al host.
+# ---------------------------------------------------------------------------
+name: ${COMPOSE_PROJECT_NAME:-sistema-contable}
+
+services:
+  # -------------------------------------------------------------------------
+  # Base de datos
+  # -------------------------------------------------------------------------
+  db:
+    image: postgres:17-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-sistema-contable}-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB es obligatorio (ver infra/.env.dev)}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER es obligatorio (ver infra/.env.dev)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio (ver infra/.env.dev)}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - app
+
+  # -------------------------------------------------------------------------
+  # Redis: contadores de rate limiting compartidos entre workers.
+  # Sin persistencia perderíamos los bloqueos al reiniciar, por eso AOF.
+  # -------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-sistema-contable}-redis
+    command:
+      - redis-server
+      - --appendonly
+      - 'yes'
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD es obligatorio (ver infra/.env.dev)}
+    environment:
+      # El healthcheck no pasa la clave por la línea de comandos.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    expose:
+      - '6379'
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - app
+
+  # -------------------------------------------------------------------------
+  # Backend (Flask)
+  # -------------------------------------------------------------------------
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Containerfile
+      target: prod
+    container_name: ${COMPOSE_PROJECT_NAME:-sistema-contable}-backend
+    environment:
+      # Una sola fuente de verdad para las credenciales de Postgres y Redis.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+    expose:
+      - '5000'
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=2).status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - app
+
+  # -------------------------------------------------------------------------
+  # Frontend (Vue)
+  # En desarrollo corre Vite; en producción es nginx con el build estático.
+  # -------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ..
+      dockerfile: frontend/Containerfile
+      target: prod
+    container_name: ${COMPOSE_PROJECT_NAME:-sistema-contable}-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:

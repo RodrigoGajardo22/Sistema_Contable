@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>API · Sistema Contable</title>
+    <link rel="icon" type="image/png" href="/api/docs/favicon-32x32.png" />
+    <link rel="stylesheet" href="/api/docs/swagger-ui.css" />
+    <style>
+      :root {
+        color-scheme: light;
+        --sc-bg: #0b0d12;
+        --sc-ink: #e8eaf0;
+        --sc-muted: #9aa3b5;
+        --sc-accent: #2bd98a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: #f5f7fa;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+
+      .sc-header {
+        display: flex;
+        align-items: center;
+        gap: 1.25rem;
+        flex-wrap: wrap;
+        padding: 1rem clamp(1rem, 4vw, 2.5rem);
+        background:
+          radial-gradient(120% 160% at 0% 0%, rgb(43 217 138 / 18%), transparent 55%),
+          linear-gradient(180deg, #0e1118, var(--sc-bg));
+        border-bottom: 1px solid rgb(255 255 255 / 10%);
+        color: var(--sc-ink);
+      }
+
+      .sc-header__brand {
+        display: flex;
+        align-items: center;
+        gap: 0.85rem;
+      }
+
+      .sc-header__mark {
+        display: grid;
+        place-items: center;
+        width: 2.25rem;
+        height: 2.25rem;
+        border: 1px solid rgb(43 217 138 / 45%);
+        border-radius: 0.6rem;
+        background: rgb(43 217 138 / 12%);
+        color: var(--sc-accent);
+        font-family: ui-monospace, "SFMono-Regular", monospace;
+        font-size: 0.8rem;
+      }
+
+      .sc-header__title {
+        margin: 0;
+        font-size: 1.05rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .sc-header__sub {
+        margin: 0.15rem 0 0;
+        font-size: 0.75rem;
+        color: var(--sc-muted);
+      }
+
+      .sc-header__nota {
+        margin-left: auto;
+        max-width: 34rem;
+        font-size: 0.78rem;
+        line-height: 1.5;
+        color: var(--sc-muted);
+      }
+
+      .sc-header__nota code {
+        padding: 0.1rem 0.35rem;
+        border: 1px solid rgb(255 255 255 / 12%);
+        border-radius: 0.3rem;
+        background: rgb(255 255 255 / 6%);
+        color: var(--sc-ink);
+        font-size: 0.74rem;
+      }
+
+      .sc-header__link {
+        flex: none;
+        padding: 0.45rem 0.8rem;
+        border: 1px solid rgb(255 255 255 / 16%);
+        border-radius: 0.5rem;
+        color: var(--sc-ink);
+        font-size: 0.78rem;
+        text-decoration: none;
+        transition: border-color 0.15s ease, background 0.15s ease;
+      }
+
+      .sc-header__link:hover {
+        border-color: rgb(43 217 138 / 55%);
+        background: rgb(43 217 138 / 10%);
+      }
+
+      #swagger-ui {
+        max-width: 90rem;
+        margin: 0 auto;
+        padding: 0 1rem 2rem;
+      }
+
+      /* El topbar de Swagger repite el branding: usamos el nuestro. */
+      #swagger-ui .topbar {
+        display: none;
+      }
+
+      #swagger-ui .wrapper {
+        padding: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="sc-header">
+      <div class="sc-header__brand">
+        <span class="sc-header__mark" aria-hidden="true">SC</span>
+        <div>
+          <p class="sc-header__title">Sistema Contable · API</p>
+          <p class="sc-header__sub">OpenAPI 3.0.3 · Vue 3 + Flask + PostgreSQL</p>
+        </div>
+      </div>
+
+      <p class="sc-header__nota">
+        Para probar endpoints protegidos, autenticá con
+        <code>POST /api/auth/login</code> y pegá el <code>access_token</code> en
+        <strong>Authorize</strong>.
+      </p>
+
+      <a class="sc-header__link" href="/">Volver a la aplicación</a>
+    </header>
+
+    <div id="swagger-ui"></div>
+
+    <script src="/api/docs/swagger-ui-bundle.js"></script>
+    <script src="/api/docs/swagger-ui-standalone-preset.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({
+        url: '/api/openapi.json',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        persistAuthorization: true,
+        filter: true,
+        displayRequestDuration: true,
+        tryItOutEnabled: true,
+        docExpansion: 'none',
+        defaultModelsExpandDepth: 0,
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
+        layout: 'BaseLayout',
+      })
+    </script>
+  </body>
+</html>

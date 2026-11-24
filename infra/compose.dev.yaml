@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# Overlay de DESARROLLO.
+#
+#   podman compose -f infra/compose.yaml -f infra/compose.dev.yaml \
+#     --env-file infra/.env.dev up -d --build
+#
+# Agrega:
+#   - bind mounts con recarga automática para backend y frontend
+#   - un gateway nginx publicado en :8080 (única URL de acceso)
+# ---------------------------------------------------------------------------
+services:
+  backend:
+    build:
+      target: dev
+    env_file:
+      - ../backend/.env.dev
+    volumes:
+      - ../backend:/app
+    healthcheck:
+      # El reloader de Flask tarda un poco más en levantar.
+      start_period: 40s
+
+  frontend:
+    build:
+      target: dev
+    env_file:
+      - ../frontend/.env.dev
+    volumes:
+      # El código se edita desde el host…
+      - ../frontend:/app
+      # …pero node_modules vive en un volumen de Linux: el del host (Windows)
+      # tiene binarios nativos incompatibles. Podman lo inicializa con el
+      # contenido de la imagen, así que las dependencias ya vienen instaladas.
+      - frontend_node_modules:/app/node_modules
+    expose:
+      - '5173'
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:5173/']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # Única puerta de entrada: http://localhost:8080
+  gateway:
+    image: nginx:1.27-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-sistema-contable}-gateway
+    ports:
+      - '8080:80'
+    volumes:
+      - ./nginx/dev.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+    networks:
+      - app
+
+volumes:
+  frontend_node_modules:

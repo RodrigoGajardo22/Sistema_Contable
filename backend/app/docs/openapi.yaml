@@ -1,0 +1,2919 @@
+openapi: 3.0.3
+
+info:
+  title: Sistema Contable API
+  version: 1.0.0
+  description: |
+    API REST del sistema contable para estudios contables y sus clientes.
+
+    **Respuestas exitosas**
+
+    ```json
+    { "datos": {}, "meta": { "total": 0 } }
+    ```
+
+    `datos` contiene el recurso o la lista y `meta` es opcional (totales,
+    paginación o rango de fechas).
+
+    **Errores**
+
+    ```json
+    { "error": { "codigo": "credenciales_invalidas", "mensaje": "Email o contraseña incorrectos.", "detalles": {} } }
+    ```
+
+    `codigo` es estable y el frontend decide con él; `mensaje` es texto
+    mostrable. Los importes viajan siempre como string (`"1250.00"`), nunca
+    como número JSON.
+
+    **Autenticación**
+
+    JWT con access token de 15 minutos y refresh token de 7 días. Enviá el
+    access token en `Authorization: Bearer <token>`. Para probar la API desde
+    esta página: ejecutá `POST /api/auth/login`, copiá el `access_token` y
+    usá el botón **Authorize**.
+
+servers:
+  - url: /api
+    description: Gateway de desarrollo y producción
+
+tags:
+  - name: Sistema
+    description: Raíz, healthcheck y documentación.
+  - name: Auth
+    description: Login, refresh y perfil de la sesión.
+  - name: Usuarios
+    description: CRUD administrativo, claves y transferencia de propiedad.
+  - name: Clientes
+    description: Ficha versionada (append-only), historial y acceso al portal.
+  - name: Cuentas
+    description: Plan de cuentas jerárquico por cliente.
+  - name: Asientos
+    description: Libro diario con partida doble y estados inmutables.
+  - name: Comprobantes
+    description: Facturas de compra y venta con IVA y contabilización.
+  - name: Vencimientos
+    description: Agenda de obligaciones impositivas.
+  - name: Conciliación
+    description: Extractos bancarios, matching y asientos.
+  - name: Reportes
+    description: Diario, mayor, balance y libro IVA.
+  - name: Auditoría
+    description: Bitácora de cambios sensibles (sólo admin).
+  - name: Dashboard
+    description: KPIs y resumen del panel por rol.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /:
+    get:
+      tags: [Sistema]
+      summary: Raíz de la API
+      description: Devuelve el nombre y la versión del servicio.
+      security: []
+      responses:
+        '200':
+          description: Metadatos del servicio
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RaizApi'
+              example:
+                mensaje: API del sistema contable
+                version: 0.1.0
+
+  /health:
+    get:
+      tags: [Sistema]
+      summary: Healthcheck
+      description: Exento de rate limit; lo consulta el contenedor cada 10 segundos.
+      security: []
+      responses:
+        '200':
+          description: Servicio operativo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthApi'
+              example:
+                status: ok
+                service: backend
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Iniciar sesión
+      description: |
+        Valida email y contraseña con respuesta genérica: no revela si el
+        email existe. Tres fallos por cuenta en 15 minutos bloquean el login
+        (`429` con `Retry-After`); el contador vive en Redis.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Login'
+            example:
+              email: admin@estudio.com
+              password: Admin1234
+      responses:
+        '200':
+          description: Tokens y perfil del usuario
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaLogin'
+              example:
+                datos:
+                  usuario:
+                    id: 1
+                    nombre: Rodrigo Gajardo
+                    email: admin@estudio.com
+                    rol: admin
+                    activo: true
+                    es_propietario: true
+                    debe_cambiar_password: false
+                    cliente_id: null
+                  access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                  refresh_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                  token_type: Bearer
+        '401':
+          $ref: '#/components/responses/NoAutorizado'
+        '422':
+          $ref: '#/components/responses/Validacion'
+        '429':
+          $ref: '#/components/responses/DemasiadosIntentos'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Renovar el access token
+      description: 'Requiere el refresh token en `Authorization: Bearer <refresh_token>`.'
+      responses:
+        '200':
+          description: Nuevo access token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaRefresh'
+        '401':
+          $ref: '#/components/responses/NoAutorizado'
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Perfil de la sesión actual
+      responses:
+        '200':
+          description: Usuario autenticado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaUsuario'
+        '401':
+          $ref: '#/components/responses/NoAutorizado'
+
+  /usuarios:
+    get:
+      tags: [Usuarios]
+      summary: Listar usuarios
+      description: Sólo administradores. Los usuarios cliente se gestionan desde la ficha del cliente.
+      parameters:
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Rol'
+        - $ref: '#/components/parameters/Activo'
+      responses:
+        '200':
+          description: Usuarios visibles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaUsuarios'
+        '401':
+          $ref: '#/components/responses/NoAutorizado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+    post:
+      tags: [Usuarios]
+      summary: Crear usuario
+      description: |
+        Sólo administradores. El rol acepta `admin` o `contador`: el rol
+        `cliente` se crea automáticamente desde la ficha del cliente.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UsuarioCreate'
+            example:
+              nombre: Lucía Pérez
+              email: lucia@estudio.com
+              password: ClaveSegura123
+              rol: contador
+      responses:
+        '201':
+          description: Usuario creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaUsuario'
+        '401':
+          $ref: '#/components/responses/NoAutorizado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /usuarios/{usuario_id}:
+    parameters:
+      - $ref: '#/components/parameters/UsuarioId'
+    get:
+      tags: [Usuarios]
+      summary: Detalle de un usuario
+      responses:
+        '200':
+          description: Usuario
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaUsuario'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Usuarios]
+      summary: Actualizar usuario
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UsuarioUpdate'
+      responses:
+        '200':
+          description: Usuario actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaUsuario'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+    delete:
+      tags: [Usuarios]
+      summary: Dar de baja un usuario
+      description: Baja lógica. No se puede desactivar a sí mismo, ni al propietario, ni dejar el sistema sin administradores.
+      responses:
+        '200':
+          description: Usuario desactivado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaUsuario'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /usuarios/{usuario_id}/activar:
+    post:
+      tags: [Usuarios]
+      summary: Reactivar un usuario
+      parameters:
+        - $ref: '#/components/parameters/UsuarioId'
+      responses:
+        '200':
+          description: Usuario activado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaUsuario'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /usuarios/{usuario_id}/password:
+    put:
+      tags: [Usuarios]
+      summary: Cambiar contraseña
+      description: |
+        Un administrador puede cambiar la de cualquier usuario; el resto sólo
+        la propia (con `password_actual`). El cambio incrementa
+        `token_version` y revoca los JWT anteriores.
+      parameters:
+        - $ref: '#/components/parameters/UsuarioId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CambioPassword'
+      responses:
+        '200':
+          description: Contraseña actualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMensaje'
+        '401':
+          $ref: '#/components/responses/NoAutorizado'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /usuarios/{usuario_id}/propietario:
+    post:
+      tags: [Usuarios]
+      summary: Transferir la propiedad
+      description: Sólo el propietario actual. El nuevo propietario debe ser administrador activo.
+      parameters:
+        - $ref: '#/components/parameters/UsuarioId'
+      responses:
+        '200':
+          description: Nuevo propietario
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaUsuario'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /clientes:
+    get:
+      tags: [Clientes]
+      summary: Listar clientes
+      description: Un contador ve sólo su cartera; el admin, todos.
+      parameters:
+        - $ref: '#/components/parameters/Q'
+        - $ref: '#/components/parameters/Activo'
+        - $ref: '#/components/parameters/ContadorId'
+      responses:
+        '200':
+          description: Clientes visibles
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaClientes'
+        '401':
+          $ref: '#/components/responses/NoAutorizado'
+    post:
+      tags: [Clientes]
+      summary: Crear cliente
+      description: |
+        El CUIT es único e inmutable. El alta crea el plan base de 27 cuentas
+        y el acceso al portal con clave temporal (se muestra una sola vez).
+        El responsable es obligatorio: si no se envía, se asigna el creador.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClienteCreate'
+            example:
+              razon_social: Panadería La Espiga SRL
+              cuit: 30-71234567-1
+              condicion_iva: responsable_inscripto
+              email: cliente.espiga@estudio.com
+              telefono: 299-555-0101
+              direccion: Roca 123, Neuquén
+      responses:
+        '201':
+          description: Cliente creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaCliente'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /clientes/{cliente_id}:
+    parameters:
+      - $ref: '#/components/parameters/ClienteId'
+    get:
+      tags: [Clientes]
+      summary: Detalle de un cliente
+      description: Incluye los datos de la versión vigente y el usuario del portal.
+      responses:
+        '200':
+          description: Cliente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaCliente'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Clientes]
+      summary: Actualizar cliente
+      description: |
+        Crea una versión nueva (append-only). El CUIT no se modifica. Si el
+        payload no cambia nada, no se inserta una versión.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClienteUpdate'
+      responses:
+        '200':
+          description: Cliente actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaCliente'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+    delete:
+      tags: [Clientes]
+      summary: Desactivar cliente
+      description: Baja lógica; no se borran sus datos ni su historial.
+      responses:
+        '200':
+          description: Cliente desactivado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaCliente'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /clientes/{cliente_id}/activar:
+    post:
+      tags: [Clientes]
+      summary: Reactivar cliente
+      parameters:
+        - $ref: '#/components/parameters/ClienteId'
+      responses:
+        '200':
+          description: Cliente activado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaCliente'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /clientes/{cliente_id}/historial:
+    get:
+      tags: [Clientes]
+      summary: Historial de versiones
+      description: Versiones en orden cronológico, con autor y fecha de cada cambio.
+      parameters:
+        - $ref: '#/components/parameters/ClienteId'
+      responses:
+        '200':
+          description: Versiones del cliente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaVersiones'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /clientes/{cliente_id}/acceso:
+    parameters:
+      - $ref: '#/components/parameters/ClienteId'
+    post:
+      tags: [Clientes]
+      summary: Crear o reactivar acceso al portal
+      description: Devuelve la clave temporal en texto plano. Se muestra una sola vez y obliga a cambiarla en el primer ingreso.
+      responses:
+        '201':
+          description: Acceso creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaAcceso'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+    delete:
+      tags: [Clientes]
+      summary: Revocar acceso al portal
+      description: Desactiva el usuario cliente e invalida sus JWT vigentes.
+      responses:
+        '200':
+          description: Acceso revocado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMensaje'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /clientes/{cliente_id}/acceso/reset:
+    post:
+      tags: [Clientes]
+      summary: Restablecer acceso al portal
+      description: Genera una clave temporal nueva y reactiva el acceso si estaba revocado.
+      parameters:
+        - $ref: '#/components/parameters/ClienteId'
+      responses:
+        '200':
+          description: Acceso restablecido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaAcceso'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /clientes/{cliente_id}/cuentas:
+    parameters:
+      - $ref: '#/components/parameters/ClienteId'
+    get:
+      tags: [Cuentas]
+      summary: Listar el plan de cuentas
+      description: Devuelve todas las cuentas del cliente, incluidos los padres agrupadores.
+      responses:
+        '200':
+          description: Cuentas del cliente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaCuentas'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    post:
+      tags: [Cuentas]
+      summary: Crear cuenta
+      description: El código es único por cliente. Una cuenta con subcuentas o movimientos no se puede eliminar.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CuentaCreate'
+            example:
+              codigo: 1.1.06
+              nombre: Banco Galicia
+              tipo: activo
+              padre_id: null
+              imputable: true
+      responses:
+        '201':
+          description: Cuenta creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaCuenta'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /cuentas/{cuenta_id}:
+    parameters:
+      - $ref: '#/components/parameters/CuentaId'
+    get:
+      tags: [Cuentas]
+      summary: Detalle de una cuenta
+      responses:
+        '200':
+          description: Cuenta
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaCuenta'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Cuentas]
+      summary: Actualizar cuenta
+      description: El código y el tipo no se modifican después del alta.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CuentaUpdate'
+      responses:
+        '200':
+          description: Cuenta actualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaCuenta'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+    delete:
+      tags: [Cuentas]
+      summary: Eliminar cuenta
+      description: Falla si la cuenta tiene subcuentas o movimientos.
+      responses:
+        '200':
+          description: Cuenta eliminada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMensaje'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /clientes/{cliente_id}/asientos:
+    parameters:
+      - $ref: '#/components/parameters/ClienteId'
+    get:
+      tags: [Asientos]
+      summary: Listar asientos
+      description: Libro diario paginado. Sólo devuelve asientos del cliente indicado.
+      parameters:
+        - $ref: '#/components/parameters/Pagina'
+        - $ref: '#/components/parameters/PorPagina'
+        - $ref: '#/components/parameters/Desde'
+        - $ref: '#/components/parameters/Hasta'
+        - $ref: '#/components/parameters/EstadoAsiento'
+        - $ref: '#/components/parameters/CuentaFiltro'
+        - $ref: '#/components/parameters/Q'
+      responses:
+        '200':
+          description: Asientos y metadatos de paginación
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaAsientos'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+    post:
+      tags: [Asientos]
+      summary: Crear asiento
+      description: |
+        Nace en estado `borrador`. Reglas de partida doble: debe = haber,
+        al menos dos renglones, un solo lado por renglón y cuentas
+        imputables y activas del mismo cliente. La fecha no puede ser futura.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsientoCreate'
+            example:
+              fecha: 2026-11-23
+              concepto: Venta de mercadería
+              renglones:
+                - cuenta_id: 1
+                  debe: '1500.50'
+                  haber: '0.00'
+                - cuenta_id: 18
+                  debe: '0.00'
+                  haber: '1500.50'
+      responses:
+        '201':
+          description: Asiento creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaAsiento'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /asientos/{asiento_id}:
+    parameters:
+      - $ref: '#/components/parameters/AsientoId'
+    get:
+      tags: [Asientos]
+      summary: Detalle de un asiento
+      responses:
+        '200':
+          description: Asiento con renglones
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaAsiento'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Asientos]
+      summary: Editar asiento
+      description: Sólo los asientos en borrador se editan. Al guardar se vuelve a validar la partida doble.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsientoCreate'
+      responses:
+        '200':
+          description: Asiento actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaAsiento'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+    delete:
+      tags: [Asientos]
+      summary: Descartar borrador
+      description: Elimina un asiento en borrador. Los confirmados se anulan, no se borran.
+      responses:
+        '200':
+          description: Borrador descartado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMensaje'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /asientos/{asiento_id}/confirmar:
+    post:
+      tags: [Asientos]
+      summary: Confirmar asiento
+      description: El asiento confirmado es inmutable y no se puede editar ni descartar.
+      parameters:
+        - $ref: '#/components/parameters/AsientoId'
+      responses:
+        '200':
+          description: Asiento confirmado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaAsiento'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /asientos/{asiento_id}/anular:
+    post:
+      tags: [Asientos]
+      summary: Anular asiento
+      description: Exige un motivo de entre 5 y 300 caracteres. El asiento anulado se conserva.
+      parameters:
+        - $ref: '#/components/parameters/AsientoId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Anulacion'
+            example:
+              motivo: Se cargó el asiento duplicado por error.
+      responses:
+        '200':
+          description: Asiento anulado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaAsiento'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /comprobantes:
+    get:
+      tags: [Comprobantes]
+      summary: Bandeja global de comprobantes
+      description: Sólo admin y contador. Devuelve comprobantes de toda la cartera visible.
+      parameters:
+        - $ref: '#/components/parameters/ClienteIdFiltro'
+        - $ref: '#/components/parameters/TipoComprobante'
+        - $ref: '#/components/parameters/EstadoComprobante'
+        - $ref: '#/components/parameters/Desde'
+        - $ref: '#/components/parameters/Hasta'
+        - $ref: '#/components/parameters/Q'
+      responses:
+        '200':
+          description: Comprobantes con el nombre del cliente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaComprobantes'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /clientes/{cliente_id}/comprobantes:
+    parameters:
+      - $ref: '#/components/parameters/ClienteId'
+    get:
+      tags: [Comprobantes]
+      summary: Listar comprobantes de un cliente
+      parameters:
+        - $ref: '#/components/parameters/TipoComprobante'
+        - $ref: '#/components/parameters/EstadoComprobante'
+        - $ref: '#/components/parameters/Desde'
+        - $ref: '#/components/parameters/Hasta'
+        - $ref: '#/components/parameters/Q'
+      responses:
+        '200':
+          description: Comprobantes del cliente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaComprobantes'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    post:
+      tags: [Comprobantes]
+      summary: Crear comprobante
+      description: |
+        El backend calcula `iva` y `total` a partir de `neto` y `alicuota_iva`.
+        El cliente no puede enviar `iva`, `total`, `estado` ni `asiento_id`:
+        el schema los rechaza. Nace pendiente de contabilizar.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComprobanteCreate'
+            example:
+              tipo: venta
+              numero: A-0001-00000042
+              fecha: 2026-11-23
+              tercero: Cliente Final SA
+              neto: '100000.00'
+              alicuota_iva: '21.00'
+      responses:
+        '201':
+          description: Comprobante creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaComprobante'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /comprobantes/{comprobante_id}:
+    parameters:
+      - $ref: '#/components/parameters/ComprobanteId'
+    get:
+      tags: [Comprobantes]
+      summary: Detalle de un comprobante
+      responses:
+        '200':
+          description: Comprobante
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaComprobante'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    put:
+      tags: [Comprobantes]
+      summary: Actualizar comprobante
+      description: Sólo mientras está pendiente. Se recalculan IVA y total.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ComprobanteCreate'
+      responses:
+        '200':
+          description: Comprobante actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaComprobante'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+    delete:
+      tags: [Comprobantes]
+      summary: Anular comprobante
+      description: |
+        Anula el comprobante y, en cascada, su asiento contable con el mismo
+        motivo. El comprobante anulado no se borra.
+      responses:
+        '200':
+          description: Comprobante anulado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaComprobante'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /comprobantes/{comprobante_id}/contabilizar:
+    post:
+      tags: [Comprobantes]
+      summary: Contabilizar comprobante
+      description: |
+        Genera un asiento confirmado en la misma transacción y vincula el
+        comprobante 1:1. Venta: Debe Deudores por ventas / Haber Ventas +
+        IVA débito fiscal. Compra: Debe Compras + IVA crédito fiscal / Haber
+        Proveedores. Si falta una cuenta responde `409` indicando cuál.
+      parameters:
+        - $ref: '#/components/parameters/ComprobanteId'
+      responses:
+        '200':
+          description: Comprobante contabilizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaComprobante'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /vencimientos:
+    get:
+      tags: [Vencimientos]
+      summary: Agenda global de vencimientos
+      description: Sólo admin y contador. Devuelve vencimientos de toda la cartera visible.
+      parameters:
+        - $ref: '#/components/parameters/ClienteIdFiltro'
+        - $ref: '#/components/parameters/EstadoVencimiento'
+        - $ref: '#/components/parameters/Desde'
+        - $ref: '#/components/parameters/Hasta'
+        - $ref: '#/components/parameters/Proximidad'
+        - $ref: '#/components/parameters/Obligacion'
+      responses:
+        '200':
+          description: Vencimientos con el nombre del cliente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaVencimientos'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /clientes/{cliente_id}/vencimientos:
+    parameters:
+      - $ref: '#/components/parameters/ClienteId'
+    get:
+      tags: [Vencimientos]
+      summary: Listar vencimientos de un cliente
+      parameters:
+        - $ref: '#/components/parameters/EstadoVencimiento'
+        - $ref: '#/components/parameters/Desde'
+        - $ref: '#/components/parameters/Hasta'
+        - $ref: '#/components/parameters/Proximidad'
+      responses:
+        '200':
+          description: Vencimientos del cliente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaVencimientos'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    post:
+      tags: [Vencimientos]
+      summary: Crear vencimiento
+      parameters:
+        - $ref: '#/components/parameters/ClienteId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VencimientoCreate'
+            example:
+              obligacion: iva
+              periodo: 2026-11
+              fecha_vencimiento: 2026-12-18
+              observaciones: Presentar antes del vencimiento.
+      responses:
+        '201':
+          description: Vencimiento creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaVencimiento'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /vencimientos/{vencimiento_id}:
+    parameters:
+      - $ref: '#/components/parameters/VencimientoId'
+    put:
+      tags: [Vencimientos]
+      summary: Actualizar vencimiento
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VencimientoUpdate'
+      responses:
+        '200':
+          description: Vencimiento actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaVencimiento'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacion'
+    delete:
+      tags: [Vencimientos]
+      summary: Eliminar vencimiento
+      responses:
+        '200':
+          description: Vencimiento eliminado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMensaje'
+
+  /vencimientos/{vencimiento_id}/estado:
+    post:
+      tags: [Vencimientos]
+      summary: Cambiar estado del vencimiento
+      parameters:
+        - $ref: '#/components/parameters/VencimientoId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EstadoVencimientoBody'
+            example:
+              estado: presentado
+      responses:
+        '200':
+          description: Vencimiento actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaVencimiento'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /clientes/{cliente_id}/extractos:
+    parameters:
+      - $ref: '#/components/parameters/ClienteId'
+    get:
+      tags: [Conciliación]
+      summary: Listar extractos bancarios
+      responses:
+        '200':
+          description: Extractos con resumen de conciliación
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaExtractos'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    post:
+      tags: [Conciliación]
+      summary: Importar extracto CSV
+      description: |
+        El CSV usa `;` como separador y acepta importes con coma decimal.
+        Cada movimiento nace `pendiente`; el matching automático vincula
+        asientos por importe exacto y fecha ±3 días.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtractoCreate'
+            example:
+              banco: Galicia
+              periodo: 2026-11
+              saldo_inicial: '0.00'
+              saldo_final: '96000.00'
+              csv: |
+                fecha;descripcion;importe
+                2026-11-23;Transferencia cliente;121000,00
+                2026-11-23;Pago de servicios;-25000,00
+      responses:
+        '201':
+          description: Extracto importado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaExtracto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /extractos/{extracto_id}:
+    parameters:
+      - $ref: '#/components/parameters/ExtractoId'
+    get:
+      tags: [Conciliación]
+      summary: Detalle de un extracto
+      responses:
+        '200':
+          description: Extracto con movimientos y sugerencias
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaExtracto'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+    delete:
+      tags: [Conciliación]
+      summary: Eliminar extracto
+      responses:
+        '200':
+          description: Extracto eliminado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMensaje'
+
+  /movimientos/{movimiento_id}/vincular:
+    put:
+      tags: [Conciliación]
+      summary: Vincular movimiento
+      description: Indicá exactamente un asiento o un comprobante.
+      parameters:
+        - $ref: '#/components/parameters/MovimientoId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Vincular'
+            example:
+              asiento_id: 12
+      responses:
+        '200':
+          description: Movimiento vinculado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMovimientoVinculo'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /movimientos/{movimiento_id}/descartar:
+    put:
+      tags: [Conciliación]
+      summary: Descartar movimiento
+      parameters:
+        - $ref: '#/components/parameters/MovimientoId'
+      responses:
+        '200':
+          description: Movimiento descartado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMovimiento'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /movimientos/{movimiento_id}/desvincular:
+    put:
+      tags: [Conciliación]
+      summary: Desvincular movimiento
+      parameters:
+        - $ref: '#/components/parameters/MovimientoId'
+      responses:
+        '200':
+          description: Movimiento pendiente otra vez
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMovimiento'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+
+  /movimientos/{movimiento_id}/asiento:
+    post:
+      tags: [Conciliación]
+      summary: Generar asiento desde un movimiento
+      description: Crea un asiento confirmado contra la cuenta indicada y vincula el movimiento.
+      parameters:
+        - $ref: '#/components/parameters/MovimientoId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsientoDesdeMovimiento'
+            example:
+              cuenta_id: 3
+              concepto: Pago de servicios bancarios
+      responses:
+        '201':
+          description: Asiento generado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaAsientoDesdeMovimiento'
+        '409':
+          $ref: '#/components/responses/Conflicto'
+        '422':
+          $ref: '#/components/responses/Validacion'
+
+  /clientes/{cliente_id}/reportes/diario:
+    get:
+      tags: [Reportes]
+      summary: Libro diario
+      description: Asientos confirmados del rango, con todos sus renglones.
+      parameters:
+        - $ref: '#/components/parameters/ClienteId'
+        - $ref: '#/components/parameters/DesdeOpcional'
+        - $ref: '#/components/parameters/HastaOpcional'
+      responses:
+        '200':
+          description: Asientos del período
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaDiario'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /clientes/{cliente_id}/reportes/mayor:
+    get:
+      tags: [Reportes]
+      summary: Libro mayor
+      description: Movimientos y saldo acumulado de una cuenta en el rango.
+      parameters:
+        - $ref: '#/components/parameters/ClienteId'
+        - name: cuenta
+          in: query
+          required: true
+          description: Id de la cuenta del cliente.
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/DesdeOpcional'
+        - $ref: '#/components/parameters/HastaOpcional'
+      responses:
+        '200':
+          description: Mayor de la cuenta
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaMayor'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /clientes/{cliente_id}/reportes/balance:
+    get:
+      tags: [Reportes]
+      summary: Balance de sumas y saldos
+      parameters:
+        - $ref: '#/components/parameters/ClienteId'
+        - $ref: '#/components/parameters/DesdeOpcional'
+        - $ref: '#/components/parameters/HastaOpcional'
+      responses:
+        '200':
+          description: Balance del período
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaBalance'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /clientes/{cliente_id}/reportes/libro-iva:
+    get:
+      tags: [Reportes]
+      summary: Libro IVA compras y ventas
+      parameters:
+        - $ref: '#/components/parameters/ClienteId'
+        - $ref: '#/components/parameters/DesdeOpcional'
+        - $ref: '#/components/parameters/HastaOpcional'
+      responses:
+        '200':
+          description: Libro IVA del período
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaLibroIva'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+
+  /auditoria:
+    get:
+      tags: [Auditoría]
+      summary: Consultar la auditoría
+      description: Sólo admin. Devuelve hasta 300 entradas, de la más reciente a la más antigua.
+      parameters:
+        - name: entidad
+          in: query
+          description: Entidad afectada (por ejemplo cliente, asiento o comprobante).
+          schema:
+            type: string
+        - name: accion
+          in: query
+          description: Acción registrada (crear, actualizar, baja, confirmar, anular).
+          schema:
+            type: string
+        - name: usuario
+          in: query
+          description: Id del usuario que realizó la acción.
+          schema:
+            type: integer
+        - $ref: '#/components/parameters/Desde'
+        - $ref: '#/components/parameters/Hasta'
+      responses:
+        '200':
+          description: Entradas de auditoría
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaListaAuditoria'
+        '403':
+          $ref: '#/components/responses/SinPermiso'
+
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Resumen del panel
+      description: |
+        Los KPIs y las listas se ajustan al rol: el cliente ve sólo su
+        información; el contador, su cartera; el admin, todo.
+      responses:
+        '200':
+          description: KPIs y listas del panel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RespuestaDashboard'
+        '401':
+          $ref: '#/components/responses/NoAutorizado'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token JWT emitido por POST /auth/login.
+
+  parameters:
+    ClienteId:
+      name: cliente_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    UsuarioId:
+      name: usuario_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    CuentaId:
+      name: cuenta_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    AsientoId:
+      name: asiento_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    ComprobanteId:
+      name: comprobante_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    VencimientoId:
+      name: vencimiento_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    ExtractoId:
+      name: extracto_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    MovimientoId:
+      name: movimiento_id
+      in: path
+      required: true
+      schema:
+        type: integer
+    Q:
+      name: q
+      in: query
+      description: Búsqueda textual.
+      schema:
+        type: string
+    Activo:
+      name: activo
+      in: query
+      description: Filtrar por estado activo o inactivo.
+      schema:
+        type: boolean
+    Rol:
+      name: rol
+      in: query
+      schema:
+        type: string
+        enum: [admin, contador, cliente]
+    ContadorId:
+      name: contador
+      in: query
+      description: Id del contador responsable.
+      schema:
+        type: integer
+    ClienteIdFiltro:
+      name: cliente_id
+      in: query
+      description: Restringir a un cliente.
+      schema:
+        type: integer
+    Pagina:
+      name: pagina
+      in: query
+      description: Página, desde 1.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PorPagina:
+      name: por_pagina
+      in: query
+      description: Elementos por página, entre 1 y 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Desde:
+      name: desde
+      in: query
+      schema:
+        type: string
+        format: date
+    Hasta:
+      name: hasta
+      in: query
+      schema:
+        type: string
+        format: date
+    DesdeOpcional:
+      name: desde
+      in: query
+      description: Primer día del mes en curso si se omite.
+      schema:
+        type: string
+        format: date
+    HastaOpcional:
+      name: hasta
+      in: query
+      description: Fecha de hoy si se omite.
+      schema:
+        type: string
+        format: date
+    EstadoAsiento:
+      name: estado
+      in: query
+      schema:
+        type: string
+        enum: [borrador, confirmado, anulado]
+    EstadoComprobante:
+      name: estado
+      in: query
+      schema:
+        type: string
+        enum: [pendiente, contabilizado, anulado]
+    EstadoVencimiento:
+      name: estado
+      in: query
+      schema:
+        type: string
+        enum: [pendiente, presentado, pagado]
+    TipoComprobante:
+      name: tipo
+      in: query
+      schema:
+        type: string
+        enum: [compra, venta]
+    Proximidad:
+      name: proximidad
+      in: query
+      description: Próximos 30 días o vencidos sin presentar ni pagar.
+      schema:
+        type: string
+        enum: [proximos, vencidos]
+    Obligacion:
+      name: obligacion
+      in: query
+      schema:
+        type: string
+        enum: [iva, ingresos_brutos, ganancias, autonomos, municipal, otro]
+    CuentaFiltro:
+      name: cuenta
+      in: query
+      description: Id de cuenta para filtrar asientos.
+      schema:
+        type: integer
+
+  responses:
+    NoAutorizado:
+      description: Falta el token o es inválido o expiró.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: token_expirado
+              mensaje: Tu sesión expiró.
+    SinPermiso:
+      description: El rol no alcanza para esta operación.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: sin_permiso
+              mensaje: No tenés permiso para realizar esta acción.
+    NoEncontrado:
+      description: El recurso no existe o no pertenece al alcance del usuario.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: no_encontrado
+              mensaje: El recurso solicitado no existe.
+    Conflicto:
+      description: La operación entra en conflicto con el estado actual o con datos existentes.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: conflicto
+              mensaje: La operación entra en conflicto con datos existentes.
+    Validacion:
+      description: Datos inválidos en la solicitud.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: validacion
+              mensaje: Hay datos inválidos en la solicitud.
+              detalles:
+                email:
+                  - Not a valid email address.
+    DemasiadosIntentos:
+      description: Rate limit o bloqueo por intentos fallidos de login.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              codigo: demasiados_intentos
+              mensaje: Demasiados intentos fallidos. Probá de nuevo en 15 minutos.
+              detalles:
+                reintentar_en_segundos: 900
+
+  schemas:
+    RaizApi:
+      type: object
+      properties:
+        mensaje:
+          type: string
+          example: API del sistema contable
+        version:
+          type: string
+          example: 0.1.0
+
+    HealthApi:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: backend
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [codigo, mensaje]
+          properties:
+            codigo:
+              type: string
+              description: Código estable para decisiones del frontend.
+              example: validacion
+            mensaje:
+              type: string
+              description: Texto mostrable al usuario.
+            detalles:
+              type: object
+              additionalProperties: true
+
+    Meta:
+      type: object
+      properties:
+        total:
+          type: integer
+        pagina:
+          type: integer
+        por_pagina:
+          type: integer
+        desde:
+          type: string
+          format: date
+        hasta:
+          type: string
+          format: date
+
+    Respuesta:
+      type: object
+      required: [datos]
+      properties:
+        datos: {}
+        meta:
+          $ref: '#/components/schemas/Meta'
+
+    RespuestaMensaje:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                mensaje:
+                  type: string
+
+    Login:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    RespuestaLogin:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                usuario:
+                  $ref: '#/components/schemas/Usuario'
+                access_token:
+                  type: string
+                refresh_token:
+                  type: string
+                token_type:
+                  type: string
+                  example: Bearer
+
+    RespuestaRefresh:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                access_token:
+                  type: string
+                token_type:
+                  type: string
+                  example: Bearer
+
+    Usuario:
+      type: object
+      properties:
+        id:
+          type: integer
+        nombre:
+          type: string
+        email:
+          type: string
+          format: email
+        rol:
+          type: string
+          enum: [admin, contador, cliente]
+        activo:
+          type: boolean
+        es_propietario:
+          type: boolean
+        debe_cambiar_password:
+          type: boolean
+        cliente_id:
+          type: integer
+          nullable: true
+          description: Ficha propia cuando el rol es cliente.
+        creado_en:
+          type: string
+          format: date-time
+        actualizado_en:
+          type: string
+          format: date-time
+
+    UsuarioCreate:
+      type: object
+      required: [nombre, email, password, rol]
+      properties:
+        nombre:
+          type: string
+          minLength: 2
+          maxLength: 120
+        email:
+          type: string
+          format: email
+          maxLength: 180
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        rol:
+          type: string
+          enum: [admin, contador]
+
+    UsuarioUpdate:
+      type: object
+      properties:
+        nombre:
+          type: string
+          minLength: 2
+          maxLength: 120
+        email:
+          type: string
+          format: email
+          maxLength: 180
+        rol:
+          type: string
+          enum: [admin, contador]
+
+    CambioPassword:
+      type: object
+      required: [password_nueva]
+      properties:
+        password_actual:
+          type: string
+          description: Obligatoria cuando el usuario cambia su propia clave.
+        password_nueva:
+          type: string
+          minLength: 8
+          maxLength: 128
+
+    RespuestaUsuario:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              $ref: '#/components/schemas/Usuario'
+
+    RespuestaListaUsuarios:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                $ref: '#/components/schemas/Usuario'
+
+    Cliente:
+      type: object
+      properties:
+        id:
+          type: integer
+        cuit:
+          type: string
+          description: Único e inmutable.
+        activo:
+          type: boolean
+        razon_social:
+          type: string
+        condicion_iva:
+          type: string
+          enum: [responsable_inscripto, monotributo, exento, consumidor_final]
+        condicion_iva_etiqueta:
+          type: string
+        email:
+          type: string
+          format: email
+          nullable: true
+        telefono:
+          type: string
+          nullable: true
+        direccion:
+          type: string
+          nullable: true
+        contador_id:
+          type: integer
+          nullable: true
+        contador_nombre:
+          type: string
+          nullable: true
+        contador_email:
+          type: string
+          nullable: true
+        usuario_id:
+          type: integer
+          nullable: true
+        usuario_nombre:
+          type: string
+          nullable: true
+        usuario_email:
+          type: string
+          nullable: true
+        usuario_activo:
+          type: boolean
+          nullable: true
+        acceso_temporal:
+          type: string
+          nullable: true
+          description: Clave temporal, sólo en el alta o al crear el acceso.
+        version_id:
+          type: integer
+        actualizado_en:
+          type: string
+          format: date-time
+        actualizado_por:
+          type: string
+          nullable: true
+
+    ClienteCreate:
+      type: object
+      required: [razon_social, cuit, condicion_iva, email]
+      properties:
+        razon_social:
+          type: string
+          minLength: 2
+          maxLength: 160
+        cuit:
+          type: string
+          minLength: 11
+          maxLength: 14
+          example: 30-71234567-1
+        condicion_iva:
+          type: string
+          enum: [responsable_inscripto, monotributo, exento, consumidor_final]
+        email:
+          type: string
+          format: email
+          maxLength: 180
+          description: Credencial del portal; sin email no se crea el usuario cliente.
+        telefono:
+          type: string
+          maxLength: 40
+          nullable: true
+        direccion:
+          type: string
+          maxLength: 200
+          nullable: true
+        contador_id:
+          type: integer
+          nullable: true
+          description: Responsable; por defecto, el creador.
+
+    ClienteUpdate:
+      type: object
+      properties:
+        razon_social:
+          type: string
+          minLength: 2
+          maxLength: 160
+        condicion_iva:
+          type: string
+          enum: [responsable_inscripto, monotributo, exento, consumidor_final]
+        email:
+          type: string
+          format: email
+          nullable: true
+        telefono:
+          type: string
+          maxLength: 40
+          nullable: true
+        direccion:
+          type: string
+          maxLength: 200
+          nullable: true
+        contador_id:
+          type: integer
+          nullable: true
+
+    ClienteVersion:
+      type: object
+      properties:
+        id:
+          type: integer
+        razon_social:
+          type: string
+        condicion_iva:
+          type: string
+        condicion_iva_etiqueta:
+          type: string
+        email:
+          type: string
+          nullable: true
+        telefono:
+          type: string
+          nullable: true
+        direccion:
+          type: string
+          nullable: true
+        contador_id:
+          type: integer
+          nullable: true
+        contador_nombre:
+          type: string
+          nullable: true
+        creado_en:
+          type: string
+          format: date-time
+        creado_por:
+          type: string
+          nullable: true
+
+    RespuestaCliente:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              $ref: '#/components/schemas/Cliente'
+
+    RespuestaListaClientes:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                $ref: '#/components/schemas/Cliente'
+
+    RespuestaListaVersiones:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                $ref: '#/components/schemas/ClienteVersion'
+
+    RespuestaAcceso:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                usuario_id:
+                  type: integer
+                nombre:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                password_temporal:
+                  type: string
+                  description: Se muestra una sola vez.
+
+    Cuenta:
+      type: object
+      properties:
+        id:
+          type: integer
+        cliente_id:
+          type: integer
+        codigo:
+          type: string
+          description: Único por cliente.
+        nombre:
+          type: string
+        tipo:
+          type: string
+          enum: [activo, pasivo, patrimonio, ingreso, egreso]
+        tipo_etiqueta:
+          type: string
+        padre_id:
+          type: integer
+          nullable: true
+        imputable:
+          type: boolean
+        activa:
+          type: boolean
+        creado_en:
+          type: string
+          format: date-time
+
+    CuentaCreate:
+      type: object
+      required: [codigo, nombre, tipo]
+      properties:
+        codigo:
+          type: string
+          minLength: 1
+          maxLength: 20
+        nombre:
+          type: string
+          minLength: 2
+          maxLength: 120
+        tipo:
+          type: string
+          enum: [activo, pasivo, patrimonio, ingreso, egreso]
+        padre_id:
+          type: integer
+          nullable: true
+        imputable:
+          type: boolean
+          default: false
+
+    CuentaUpdate:
+      type: object
+      properties:
+        nombre:
+          type: string
+          minLength: 2
+          maxLength: 120
+        padre_id:
+          type: integer
+          nullable: true
+        imputable:
+          type: boolean
+        activa:
+          type: boolean
+
+    RespuestaCuenta:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              $ref: '#/components/schemas/Cuenta'
+
+    RespuestaListaCuentas:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                $ref: '#/components/schemas/Cuenta'
+
+    RenglonEntrada:
+      type: object
+      required: [cuenta_id]
+      properties:
+        cuenta_id:
+          type: integer
+        debe:
+          type: string
+          pattern: '^\d+(\.\d{1,2})?$'
+          default: '0.00'
+          description: Importe string, no negativo y con hasta dos decimales.
+        haber:
+          type: string
+          pattern: '^\d+(\.\d{1,2})?$'
+          default: '0.00'
+          description: Importe string, no negativo y con hasta dos decimales.
+
+    AsientoCreate:
+      type: object
+      required: [fecha, concepto, renglones]
+      properties:
+        fecha:
+          type: string
+          format: date
+          description: No puede ser futura.
+        concepto:
+          type: string
+          minLength: 3
+          maxLength: 200
+        renglones:
+          type: array
+          minItems: 2
+          items:
+            $ref: '#/components/schemas/RenglonEntrada'
+
+    Anulacion:
+      type: object
+      required: [motivo]
+      properties:
+        motivo:
+          type: string
+          minLength: 5
+          maxLength: 300
+
+    RenglonSalida:
+      type: object
+      properties:
+        id:
+          type: integer
+        cuenta_id:
+          type: integer
+        cuenta_codigo:
+          type: string
+        cuenta_nombre:
+          type: string
+        debe:
+          type: string
+        haber:
+          type: string
+
+    Asiento:
+      type: object
+      properties:
+        id:
+          type: integer
+        cliente_id:
+          type: integer
+        numero:
+          type: integer
+        fecha:
+          type: string
+          format: date
+        concepto:
+          type: string
+        estado:
+          type: string
+          enum: [borrador, confirmado, anulado]
+        estado_etiqueta:
+          type: string
+        renglones:
+          type: array
+          items:
+            $ref: '#/components/schemas/RenglonSalida'
+        creado_por:
+          type: string
+          nullable: true
+        creado_en:
+          type: string
+          format: date-time
+        anulado_por:
+          type: string
+          nullable: true
+        motivo_anulacion:
+          type: string
+          nullable: true
+        anulado_en:
+          type: string
+          format: date-time
+          nullable: true
+
+    AsientoResumen:
+      type: object
+      properties:
+        id:
+          type: integer
+        cliente_id:
+          type: integer
+        numero:
+          type: integer
+        fecha:
+          type: string
+          format: date
+        concepto:
+          type: string
+        estado:
+          type: string
+          enum: [borrador, confirmado, anulado]
+        estado_etiqueta:
+          type: string
+        debe:
+          type: string
+        haber:
+          type: string
+        creado_en:
+          type: string
+          format: date-time
+
+    RespuestaAsiento:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              $ref: '#/components/schemas/Asiento'
+
+    RespuestaListaAsientos:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                $ref: '#/components/schemas/AsientoResumen'
+
+    Comprobante:
+      type: object
+      properties:
+        id:
+          type: integer
+        cliente_id:
+          type: integer
+        tipo:
+          type: string
+          enum: [compra, venta]
+        tipo_etiqueta:
+          type: string
+        numero:
+          type: string
+        fecha:
+          type: string
+          format: date
+        tercero:
+          type: string
+        neto:
+          type: string
+        alicuota_iva:
+          type: string
+        iva:
+          type: string
+        total:
+          type: string
+        estado:
+          type: string
+          enum: [pendiente, contabilizado, anulado]
+        estado_etiqueta:
+          type: string
+        asiento_id:
+          type: integer
+          nullable: true
+        asiento_numero:
+          type: integer
+          nullable: true
+        motivo_anulacion:
+          type: string
+          nullable: true
+        creado_por:
+          type: string
+          nullable: true
+        creado_en:
+          type: string
+          format: date-time
+        actualizado_en:
+          type: string
+          format: date-time
+
+    ComprobanteCreate:
+      type: object
+      required: [tipo, numero, fecha, tercero, neto, alicuota_iva]
+      properties:
+        tipo:
+          type: string
+          enum: [compra, venta]
+        numero:
+          type: string
+          minLength: 1
+          maxLength: 40
+        fecha:
+          type: string
+          format: date
+        tercero:
+          type: string
+          minLength: 2
+          maxLength: 160
+        neto:
+          type: string
+          pattern: '^\d+(\.\d{1,2})?$'
+        alicuota_iva:
+          type: string
+          pattern: '^\d+(\.\d{1,2})?$'
+          description: Alícuota admitida 0, 10.5, 21 o 27.
+          example: '21.00'
+
+    RespuestaComprobante:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              $ref: '#/components/schemas/Comprobante'
+
+    RespuestaListaComprobantes:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                allOf:
+                  - $ref: '#/components/schemas/Comprobante'
+                  - type: object
+                    properties:
+                      cliente_nombre:
+                        type: string
+                        nullable: true
+
+    Vencimiento:
+      type: object
+      properties:
+        id:
+          type: integer
+        cliente_id:
+          type: integer
+        obligacion:
+          type: string
+          enum: [iva, ingresos_brutos, ganancias, autonomos, municipal, otro]
+        obligacion_etiqueta:
+          type: string
+        periodo:
+          type: string
+        fecha_vencimiento:
+          type: string
+          format: date
+        estado:
+          type: string
+          enum: [pendiente, presentado, pagado]
+        estado_etiqueta:
+          type: string
+        vencido:
+          type: boolean
+        observaciones:
+          type: string
+          nullable: true
+
+    VencimientoCreate:
+      type: object
+      required: [obligacion, periodo, fecha_vencimiento]
+      properties:
+        obligacion:
+          type: string
+          enum: [iva, ingresos_brutos, ganancias, autonomos, municipal, otro]
+        periodo:
+          type: string
+          minLength: 3
+          maxLength: 10
+        fecha_vencimiento:
+          type: string
+          format: date
+        observaciones:
+          type: string
+          maxLength: 300
+          nullable: true
+
+    VencimientoUpdate:
+      type: object
+      properties:
+        obligacion:
+          type: string
+          enum: [iva, ingresos_brutos, ganancias, autonomos, municipal, otro]
+        periodo:
+          type: string
+          minLength: 3
+          maxLength: 10
+        fecha_vencimiento:
+          type: string
+          format: date
+        observaciones:
+          type: string
+          maxLength: 300
+          nullable: true
+
+    EstadoVencimientoBody:
+      type: object
+      required: [estado]
+      properties:
+        estado:
+          type: string
+          enum: [pendiente, presentado, pagado]
+
+    RespuestaVencimiento:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              $ref: '#/components/schemas/Vencimiento'
+
+    RespuestaListaVencimientos:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                allOf:
+                  - $ref: '#/components/schemas/Vencimiento'
+                  - type: object
+                    properties:
+                      cliente_nombre:
+                        type: string
+                        nullable: true
+
+    ExtractoCreate:
+      type: object
+      required: [banco, periodo, csv]
+      properties:
+        banco:
+          type: string
+          minLength: 2
+          maxLength: 80
+        periodo:
+          type: string
+          minLength: 3
+          maxLength: 10
+        saldo_inicial:
+          type: string
+          nullable: true
+          description: Importe string.
+        saldo_final:
+          type: string
+          nullable: true
+          description: Importe string.
+        csv:
+          type: string
+          description: CSV con encabezado fecha;descripcion;importe.
+
+    ResumenConciliacion:
+      type: object
+      properties:
+        movimientos:
+          type: integer
+        conciliados:
+          type: integer
+        pendientes:
+          type: integer
+        suma_movimientos:
+          type: string
+        saldo_contable:
+          type: string
+        diferencia:
+          type: string
+
+    Sugerencia:
+      type: object
+      properties:
+        asiento_id:
+          type: integer
+        numero:
+          type: integer
+        fecha:
+          type: string
+          format: date
+        concepto:
+          type: string
+
+    Movimiento:
+      type: object
+      properties:
+        id:
+          type: integer
+        fecha:
+          type: string
+          format: date
+        descripcion:
+          type: string
+        importe:
+          type: string
+        estado:
+          type: string
+          enum: [pendiente, conciliado, descartado]
+        estado_etiqueta:
+          type: string
+        asiento_id:
+          type: integer
+          nullable: true
+        asiento_numero:
+          type: integer
+          nullable: true
+        comprobante_id:
+          type: integer
+          nullable: true
+        comprobante_numero:
+          type: string
+          nullable: true
+        sugerencias:
+          type: array
+          items:
+            $ref: '#/components/schemas/Sugerencia'
+
+    Extracto:
+      type: object
+      properties:
+        id:
+          type: integer
+        cliente_id:
+          type: integer
+        banco:
+          type: string
+        periodo:
+          type: string
+        saldo_inicial:
+          type: string
+        saldo_final:
+          type: string
+        resumen:
+          $ref: '#/components/schemas/ResumenConciliacion'
+        movimientos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Movimiento'
+
+    RespuestaExtracto:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              $ref: '#/components/schemas/Extracto'
+
+    RespuestaListaExtractos:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                $ref: '#/components/schemas/Extracto'
+
+    Vincular:
+      type: object
+      description: Exactamente uno de asiento_id o comprobante_id.
+      properties:
+        asiento_id:
+          type: integer
+          nullable: true
+        comprobante_id:
+          type: integer
+          nullable: true
+
+    AsientoDesdeMovimiento:
+      type: object
+      required: [cuenta_id]
+      properties:
+        cuenta_id:
+          type: integer
+        concepto:
+          type: string
+          maxLength: 190
+          nullable: true
+
+    RespuestaMovimiento:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                id:
+                  type: integer
+                estado:
+                  type: string
+                  enum: [pendiente, conciliado, descartado]
+
+    RespuestaMovimientoVinculo:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                id:
+                  type: integer
+                estado:
+                  type: string
+                asiento_id:
+                  type: integer
+                  nullable: true
+                comprobante_id:
+                  type: integer
+                  nullable: true
+
+    RespuestaAsientoDesdeMovimiento:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                movimiento_id:
+                  type: integer
+                asiento_id:
+                  type: integer
+                numero:
+                  type: integer
+                estado:
+                  type: string
+
+    RenglonDiario:
+      type: object
+      properties:
+        cuenta_codigo:
+          type: string
+        cuenta_nombre:
+          type: string
+        debe:
+          type: string
+        haber:
+          type: string
+
+    AsientoDiario:
+      type: object
+      properties:
+        numero:
+          type: integer
+        fecha:
+          type: string
+          format: date
+        concepto:
+          type: string
+        renglones:
+          type: array
+          items:
+            $ref: '#/components/schemas/RenglonDiario'
+
+    RespuestaDiario:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                $ref: '#/components/schemas/AsientoDiario'
+
+    MovimientoMayor:
+      type: object
+      properties:
+        fecha:
+          type: string
+          format: date
+        numero:
+          type: integer
+        concepto:
+          type: string
+        debe:
+          type: string
+        haber:
+          type: string
+        saldo:
+          type: string
+
+    RespuestaMayor:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                cuenta:
+                  type: object
+                  properties:
+                    codigo:
+                      type: string
+                    nombre:
+                      type: string
+                    tipo:
+                      type: string
+                saldo_inicial:
+                  type: string
+                movimientos:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/MovimientoMayor'
+                saldo_final:
+                  type: string
+
+    CuentaBalance:
+      type: object
+      properties:
+        codigo:
+          type: string
+        nombre:
+          type: string
+        tipo:
+          type: string
+        debe:
+          type: string
+        haber:
+          type: string
+        saldo:
+          type: string
+
+    RespuestaBalance:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                cuentas:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/CuentaBalance'
+                total_debe:
+                  type: string
+                total_haber:
+                  type: string
+                diferencia:
+                  type: string
+
+    ItemLibroIva:
+      type: object
+      properties:
+        numero:
+          type: string
+        fecha:
+          type: string
+          format: date
+        tercero:
+          type: string
+        neto:
+          type: string
+        iva:
+          type: string
+        total:
+          type: string
+
+    BloqueLibroIva:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ItemLibroIva'
+        neto:
+          type: string
+        iva:
+          type: string
+        total:
+          type: string
+
+    RespuestaLibroIva:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: object
+              properties:
+                ventas:
+                  $ref: '#/components/schemas/BloqueLibroIva'
+                compras:
+                  $ref: '#/components/schemas/BloqueLibroIva'
+
+    Auditoria:
+      type: object
+      properties:
+        id:
+          type: integer
+        usuario:
+          type: string
+        accion:
+          type: string
+        entidad:
+          type: string
+        entidad_id:
+          type: integer
+          nullable: true
+        antes:
+          type: object
+          nullable: true
+          additionalProperties: true
+        despues:
+          type: object
+          nullable: true
+          additionalProperties: true
+        fecha:
+          type: string
+          format: date-time
+          nullable: true
+
+    RespuestaListaAuditoria:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              type: array
+              items:
+                $ref: '#/components/schemas/Auditoria'
+
+    VencimientosResumen:
+      type: object
+      properties:
+        proximos:
+          type: integer
+        vencidos:
+          type: integer
+
+    VencimientoProximo:
+      type: object
+      properties:
+        id:
+          type: integer
+        cliente:
+          type: string
+        obligacion:
+          type: string
+        fecha:
+          type: string
+          format: date
+        dias:
+          type: integer
+
+    AsientoReciente:
+      type: object
+      properties:
+        id:
+          type: integer
+        numero:
+          type: integer
+        fecha:
+          type: string
+          format: date
+        concepto:
+          type: string
+        cliente:
+          type: string
+        total:
+          type: string
+
+    Dashboard:
+      type: object
+      properties:
+        clientes:
+          type: integer
+        asientos_mes:
+          type: integer
+        comprobantes_pendientes:
+          type: integer
+        comprobantes_mes:
+          type: integer
+        vencimientos:
+          $ref: '#/components/schemas/VencimientosResumen'
+        conciliaciones_pendientes:
+          type: integer
+        responsable:
+          type: object
+          nullable: true
+          properties:
+            nombre:
+              type: string
+              nullable: true
+            email:
+              type: string
+              nullable: true
+        proximos_vencimientos:
+          type: array
+          items:
+            $ref: '#/components/schemas/VencimientoProximo'
+        ultimos_asientos:
+          type: array
+          items:
+            $ref: '#/components/schemas/AsientoReciente'
+
+    RespuestaDashboard:
+      allOf:
+        - $ref: '#/components/schemas/Respuesta'
+        - type: object
+          properties:
+            datos:
+              $ref: '#/components/schemas/Dashboard'
